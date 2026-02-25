@@ -1,33 +1,39 @@
 ---
 name: logging-best-practices
-description: Logging best practices focused on wide events (canonical log lines) for powerful debugging and analytics
+description: >
+  Implements structured logging using wide events (canonical log lines) with high-cardinality context.
+  Designs canonical log line schemas, configures single-logger patterns, builds wide event middleware,
+  and adds business and environment context to log output.
+  Use when writing logging code, reviewing log statements, designing a logging strategy,
+  setting up log infrastructure, adding observability, structuring logs for analytics,
+  or replacing scattered console.log calls with queryable structured events.
+  Not for application-level error handling or monitoring/alerting configuration.
 license: MIT
 metadata:
   author: boristane
   version: "1.0.0"
+  category: observability
 ---
 
-# Logging Best Practices Skill
+# Logging Best Practices
 
-Version: 1.0.0
+## Output Format
 
-## Purpose
+Produces structured JSON log events containing request context, business context, environment metadata, and timing — one wide event per request per service.
 
-This skill provides guidelines for implementing effective logging in applications. It focuses on **wide events** (also called canonical log lines) - a pattern where you emit a single, context-rich event per request per service, enabling powerful debugging and analytics.
+## Workflow
 
-## When to Apply
-
-Apply these guidelines when:
-- Writing or reviewing logging code
-- Adding console.log, logger.info, or similar
-- Designing logging strategy for new services
-- Setting up logging infrastructure
+1. **Configure single logger** — Create one logger instance at startup with environment base fields (`rules/structure.md`)
+2. **Add wide event middleware** — Wrap all request handlers to initialise, time, and emit wide events (`rules/wide-events.md`)
+3. **Enrich with business context** — In each handler, add user, cart, feature flag, and domain-specific fields (`rules/context.md`)
+4. **Include environment characteristics** — Attach commit hash, service version, region, and instance ID (`rules/context.md`)
+5. **Validate** — Confirm each request produces exactly one structured JSON event with high cardinality fields; check against pitfalls (`rules/pitfalls.md`)
 
 ## Core Principles
 
 ### 1. Wide Events (CRITICAL)
 
-Emit **one context-rich event per request per service**. Instead of scattering log lines throughout your handler, consolidate everything into a single structured event emitted at request completion.
+Emit **one context-rich event per request per service** in a `finally` block. Avoid scattering multiple `console.log()` calls per request — consolidate into a single structured event.
 
 ```typescript
 const wideEvent: Record<string, unknown> = {
@@ -60,19 +66,19 @@ try {
 
 ### 2. High Cardinality & Dimensionality (CRITICAL)
 
-Include fields with high cardinality (user IDs, request IDs - millions of unique values) and high dimensionality (many fields per event). This enables querying by specific users and answering questions you haven't anticipated yet.
+Include fields with high cardinality (user IDs, request IDs — millions of unique values) and high dimensionality (20+ fields per event). This enables querying by specific users and answering questions you haven't anticipated yet.
 
 ### 3. Business Context (CRITICAL)
 
-Always include business context: user subscription tier, cart value, feature flags, account age. The goal is to know "a premium customer couldn't complete a $2,499 purchase" not just "checkout failed."
+Always include business context: user subscription tier, cart value, feature flags, account age. Avoid logging only technical details without user/business data — the goal is "a premium customer couldn't complete a $2,499 purchase" not just "checkout failed."
 
 ### 4. Environment Characteristics (CRITICAL)
 
-Include environment and deployment info in every event: commit hash, service version, region, instance ID. This enables correlating issues with deployments and identifying region-specific problems.
+Include environment and deployment info in every event: commit hash, service version, region, instance ID. Without these fields, you cannot correlate issues with deployments or identify region-specific problems.
 
 ### 5. Single Logger (HIGH)
 
-Use one logger instance configured at startup and import it everywhere. This ensures consistent formatting and automatic environment context.
+Use one logger instance configured at startup and import it everywhere. Avoid creating separate logger instances per file or bypassing the logger with `console.log`.
 
 ### 6. Middleware Pattern (HIGH)
 
@@ -80,48 +86,12 @@ Use middleware to handle wide event infrastructure (timing, status, environment,
 
 ### 7. Structure & Consistency (HIGH)
 
-- Use JSON format consistently
-- Maintain consistent field names across services
+- Use JSON format consistently — never log unstructured strings like `console.log('something happened')`
+- Maintain consistent field names across services (e.g. always `user_id`, not sometimes `userId`)
 - Simplify to two log levels: `info` and `error`
-- Never log unstructured strings
 
-## Anti-Patterns to Avoid
+## References
 
-1. **Scattered logs**: Multiple console.log() calls per request
-2. **Multiple loggers**: Different logger instances in different files
-3. **Missing environment context**: No commit hash or deployment info
-4. **Missing business context**: Logging technical details without user/business data
-5. **Unstructured strings**: `console.log('something happened')` instead of structured data
-6. **Inconsistent schemas**: Different field names across services
-
-## Guidelines
-
-### Wide Events (`rules/wide-events.md`)
-- Emit one wide event per service hop
-- Include all relevant context
-- Connect events with request ID
-- Emit at request completion in finally block
-
-### Context (`rules/context.md`)
-- Support high cardinality fields (user_id, request_id)
-- Include high dimensionality (many fields)
-- Always include business context
-- Always include environment characteristics (commit_hash, version, region)
-
-### Structure (`rules/structure.md`)
-- Use a single logger throughout the codebase
-- Use middleware for consistent wide events
-- Use JSON format
-- Maintain consistent schema
-- Simplify to info and error levels
-- Never log unstructured strings
-
-### Common Pitfalls (`rules/pitfalls.md`)
-- Avoid multiple log lines per request
-- Design for unknown unknowns
-- Always propagate request IDs across services
-
-References:
 - [Logging Sucks](https://loggingsucks.com)
 - [Observability Wide Events 101](https://boristane.com/blog/observability-wide-events-101/)
 - [Stripe - Canonical Log Lines](https://stripe.com/blog/canonical-log-lines)
