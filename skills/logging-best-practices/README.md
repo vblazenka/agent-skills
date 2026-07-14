@@ -23,7 +23,7 @@ logging-best-practices/
 ├── SKILL.md              # Agent instructions
 ├── README.md             # This file
 ├── metadata.json         # Version and references
-└── rules/
+└── references/
     ├── wide-events.md    # Core pattern (CRITICAL)
     ├── context.md        # Cardinality, business & environment context (CRITICAL)
     ├── structure.md      # Single logger, middleware, JSON format (HIGH)

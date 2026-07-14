@@ -11,7 +11,7 @@ description: >
 license: MIT
 metadata:
   author: boristane
-  version: "1.0.0"
+  version: "1.1.0"
   category: observability
 ---
 
@@ -23,75 +23,102 @@ Produces structured JSON log events containing request context, business context
 
 ## Workflow
 
-1. **Configure single logger** — Create one logger instance at startup with environment base fields (`rules/structure.md`)
-2. **Add wide event middleware** — Wrap all request handlers to initialise, time, and emit wide events (`rules/wide-events.md`)
-3. **Enrich with business context** — In each handler, add user, cart, feature flag, and domain-specific fields (`rules/context.md`)
-4. **Include environment characteristics** — Attach commit hash, service version, region, and instance ID (`rules/context.md`)
-5. **Validate** — Confirm each request produces exactly one structured JSON event with high cardinality fields; check against pitfalls (`rules/pitfalls.md`)
+1. **Configure single logger** — Create one logger instance at startup and import it everywhere; put environment characteristics (commit hash, service version, region, instance ID) in its base fields so every event carries them automatically ([full setup](references/structure.md))
+2. **Add wide event middleware** — Wrap all request handlers to initialise the event, capture timing and status, and emit exactly once in a `finally` block ([full middleware](references/wide-events.md))
+3. **Enrich with business context** — In each handler, add user, cart, feature flag, and domain-specific fields to the event ([field catalogue](references/context.md))
+4. **Validate** — Confirm each request produces exactly one structured JSON event with 20+ fields including high-cardinality IDs; check against [common pitfalls](references/pitfalls.md)
 
-## Core Principles
-
-### 1. Wide Events (CRITICAL)
-
-Emit **one context-rich event per request per service** in a `finally` block. Avoid scattering multiple `console.log()` calls per request — consolidate into a single structured event.
+### Steps 1–2: logger and middleware skeleton
 
 ```typescript
-const wideEvent: Record<string, unknown> = {
-  method: 'POST',
-  path: '/checkout',
-  requestId: c.get('requestId'),
-  timestamp: new Date().toISOString(),
-};
+// lib/logger.ts — one logger, environment attached to every event
+import pino from 'pino';
 
-try {
+export const logger = pino({
+  base: {
+    service: process.env.SERVICE_NAME,
+    version: process.env.SERVICE_VERSION,
+    commit_hash: process.env.COMMIT_SHA,
+    region: process.env.AWS_REGION,
+    instance_id: process.env.HOSTNAME,
+  },
+});
+
+// middleware/wideEvent.ts — one event per request, emitted in finally
+app.use('*', async (c, next) => {
+  const startTime = Date.now();
+  const wideEvent: Record<string, unknown> = {
+    request_id: c.get('requestId') ?? crypto.randomUUID(),
+    method: c.req.method,
+    path: c.req.path,
+  };
+  c.set('wideEvent', wideEvent);
+  try {
+    await next();
+    wideEvent.status_code = c.res.status;
+    wideEvent.outcome = c.res.status < 400 ? 'success' : 'error';
+  } catch (error) {
+    wideEvent.status_code = 500;
+    wideEvent.outcome = 'error';
+    wideEvent.error = { message: error.message, type: error.name };
+    throw error;
+  } finally {
+    wideEvent.duration_ms = Date.now() - startTime;
+    logger.info(wideEvent);
+  }
+});
+```
+
+### Step 3: handler enrichment
+
+```typescript
+app.post('/checkout', async (c) => {
+  const wideEvent = c.get('wideEvent');
+
   const user = await getUser(c.get('userId'));
-  wideEvent.user = { id: user.id, subscription: user.subscription };
+  wideEvent.user = {
+    id: user.id,
+    subscription: user.subscription,
+    account_age_days: user.accountAgeDays,
+  };
 
   const cart = await getCart(user.id);
   wideEvent.cart = { total_cents: cart.total, item_count: cart.items.length };
+  wideEvent.feature_flags = { new_checkout_flow: flags.newCheckoutFlow };
 
-  wideEvent.status_code = 200;
-  wideEvent.outcome = 'success';
   return c.json({ success: true });
-} catch (error) {
-  wideEvent.status_code = 500;
-  wideEvent.outcome = 'error';
-  wideEvent.error = { message: error.message, type: error.name };
-  throw error;
-} finally {
-  wideEvent.duration_ms = Date.now() - startTime;
-  logger.info(wideEvent);
-}
+});
+// Middleware owns timing, status, environment, and emission — handlers own business context only.
 ```
+
+## Core Rules
+
+### 1. Wide Events (CRITICAL)
+
+Emit **one context-rich event per request per service**, built up through the request lifecycle and emitted once in a `finally` block. Consolidate scattered per-request `console.log()` calls into this single structured event. ([references/wide-events.md](references/wide-events.md))
 
 ### 2. High Cardinality & Dimensionality (CRITICAL)
 
-Include fields with high cardinality (user IDs, request IDs — millions of unique values) and high dimensionality (20+ fields per event). This enables querying by specific users and answering questions you haven't anticipated yet.
+Include fields with high cardinality (user IDs, request IDs — millions of unique values) and high dimensionality (20+ fields per event). This enables querying by specific users and answering questions you haven't anticipated yet. ([references/context.md](references/context.md))
 
 ### 3. Business Context (CRITICAL)
 
-Always include business context: user subscription tier, cart value, feature flags, account age. Avoid logging only technical details without user/business data — the goal is "a premium customer couldn't complete a $2,499 purchase" not just "checkout failed."
+Include business context in every event: user subscription tier, cart value, feature flags, account age. The goal is "a premium customer couldn't complete a $2,499 purchase", not just "checkout failed". ([references/context.md](references/context.md))
 
-### 4. Environment Characteristics (CRITICAL)
+### 4. Request Correlation (HIGH)
 
-Include environment and deployment info in every event: commit hash, service version, region, instance ID. Without these fields, you cannot correlate issues with deployments or identify region-specific problems.
+Propagate a `request_id` across every service hop (e.g. an `x-request-id` header) so one query reconstructs a request's full journey through the system. ([references/wide-events.md](references/wide-events.md))
 
-### 5. Single Logger (HIGH)
+### 5. Structure & Consistency (HIGH)
 
-Use one logger instance configured at startup and import it everywhere. Avoid creating separate logger instances per file or bypassing the logger with `console.log`.
+- JSON format for every log line, each field queryable — a message tempting you toward `console.log('something happened')` becomes fields on the wide event instead
+- Consistent field names across services (always `user_id`, never `userId`)
+- Two log levels only: `info` and `error` — context that would go in a debug log goes in the wide event instead
 
-### 6. Middleware Pattern (HIGH)
-
-Use middleware to handle wide event infrastructure (timing, status, environment, emission). Handlers should only add business context.
-
-### 7. Structure & Consistency (HIGH)
-
-- Use JSON format consistently — never log unstructured strings like `console.log('something happened')`
-- Maintain consistent field names across services (e.g. always `user_id`, not sometimes `userId`)
-- Simplify to two log levels: `info` and `error`
+([references/structure.md](references/structure.md))
 
 ## References
 
 - [Logging Sucks](https://loggingsucks.com)
 - [Observability Wide Events 101](https://boristane.com/blog/observability-wide-events-101/)
-- [Stripe - Canonical Log Lines](https://stripe.com/blog/canonical-log-lines)
+- [Stripe — Canonical Log Lines](https://stripe.com/blog/canonical-log-lines)
